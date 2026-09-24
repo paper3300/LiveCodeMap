@@ -1,0 +1,27 @@
+[
+  {
+    "directory": "C:/proj",
+    "file": "ok.cpp",
+    "arguments": ["cl.exe", "/c", "ok.cpp"]
+  },
+  {
+    "directory": "C:/proj",
+    "file": "no_command.cpp"
+  },
+  {
+    "directory": "C:/proj",
+    "arguments": ["cl.exe", "/c", "missing_file_field.cpp"]
+  },
+  {
+    "directory": "C:/proj",
+    "file": "bad_args.cpp",
+    "arguments": ["cl.exe", 42, "bad_args.cpp"]
+  },
+  "not an object",
+  {
+    "directory": "C:/proj",
+    "file": "both.cpp",
+    "arguments": ["cl.exe", "/c", "both.cpp"],
+    "command": "cl.exe /c both.cpp /DIGNORED"
+  }
+]

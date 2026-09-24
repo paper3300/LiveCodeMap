@@ -1,0 +1,26 @@
+{
+  "name": "clang+llvm",
+  "version": "22.1.0",
+  "release_tag": "llvmorg-22.1.0",
+  "asset": "clang+llvm-22.1.0-x86_64-pc-windows-msvc.tar.xz",
+  "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang%2Bllvm-22.1.0-x86_64-pc-windows-msvc.tar.xz",
+  "size_bytes": 861897432,
+  "sha256": "2dd6a6c990865f98766dec58cce1cbfba48e5affc0098e5b1fff96c2f1d23e81",
+  "signature_url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang%2Bllvm-22.1.0-x86_64-pc-windows-msvc.tar.xz.sig",
+  "attestation_url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.0/clang%2Bllvm-22.1.0-x86_64-pc-windows-msvc.tar.xz.jsonl",
+  "release_keys_url": "https://releases.llvm.org/release-keys.asc",
+  "expected_signing_key_fingerprint": "71046D1E9C6656BDD61171873E83BABF4A4F9E85",
+  "archive_root": "clang+llvm-22.1.0-x86_64-pc-windows-msvc",
+  "required_paths": [
+    "lib/cmake/clang/ClangConfig.cmake",
+    "lib/cmake/llvm/LLVMConfig.cmake",
+    "lib/clangTooling.lib",
+    "lib/clangFrontend.lib",
+    "lib/clangAST.lib",
+    "lib/LLVMSupport.lib",
+    "include/clang/Tooling/Tooling.h",
+    "include/clang/AST/RecursiveASTVisitor.h"
+  ],
+  "install_relative_dir": "build/deps/clang+llvm-22.1.0-x86_64-pc-windows-msvc",
+  "runtime_notes": "Prebuilt Release libraries built with the STATIC MSVC CRT (/MT; linker metadata RuntimeLibrary=MT_StaticRelease) without RTTI or assertions. Consumers compile with /MT and /GR- in every configuration (so _ITERATOR_DEBUG_LEVEL=0 always holds; the Debug configuration links too, with own code unoptimized and no debug CRT) and must not mix in /MD objects. LLVMDebugInfoPDB's export bakes the build machine's 'VS 2022 Enterprise\\DIA SDK' path; cmake/ClangSdk.cmake remaps it to the local VS instance. LLVMWindowsManifest requires LibXml2::LibXml2, which is not shipped; it is not needed by clangTooling."
+}

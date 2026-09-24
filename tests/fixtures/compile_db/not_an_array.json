@@ -1,0 +1,1 @@
+{ "directory": "C:/proj", "file": "a.cpp", "arguments": ["cl.exe", "/c", "a.cpp"] }
