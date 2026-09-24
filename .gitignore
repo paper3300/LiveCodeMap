@@ -1,0 +1,10 @@
+# LiveCodeMap generated state
+/.livecodemap/
+
+# Private local validation inputs, configuration, and outputs
+/Workspace/Private/
+/benchmarks/private/
+/artifacts/private/
+
+# CMake build trees (see CMakePresets.json)
+/build/

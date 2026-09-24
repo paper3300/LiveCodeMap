@@ -1,0 +1,34 @@
+[
+  {
+    "directory": "C:/proj/build",
+    "file": "../src/a.cpp",
+    "arguments": ["cl.exe", "/c", "/DPROFILE_A", "../src/a.cpp"],
+    "output": "a_A.obj"
+  },
+  {
+    "directory": "C:/proj/build",
+    "file": "../src/a.cpp",
+    "arguments": ["cl.exe", "/c", "/DPROFILE_B", "../src/a.cpp"],
+    "output": "a_B.obj"
+  },
+  {
+    "directory": "C:/proj/build",
+    "file": "C:/proj/src/b.cpp",
+    "command": "cl.exe /c C:/proj/src/b.cpp /Fob.obj"
+  },
+  {
+    "directory": "C:\\proj\\build",
+    "file": "C:\\PROJ\\src\\B.CPP",
+    "arguments": ["cl.exe", "/c", "C:/proj/src/b.cpp", "/Fob.obj"]
+  },
+  {
+    "directory": "C:/proj/build",
+    "file": "../src/c.cpp",
+    "arguments": ["cl.exe", "/c", "../src/c.cpp"]
+  },
+  {
+    "directory": "C:/proj/build",
+    "file": "../src/c.cpp",
+    "arguments": ["cl.exe", "/c", "../src/c.cpp"]
+  }
+]
