@@ -397,6 +397,9 @@ spelling: a case-distinct sibling of the root on a case-sensitive volume (`CaseR
 external, Unicode/case aliases of the root or of components stay inside, and a symlink resolving
 outside is outside. Compile-command selection, entry-source identification and command identity
 likewise let the filesystem decide when the paths exist and use the lexical key only as fallback.
+Within one analysis (and one profile-index selection) `RepoPathResolver` gives the same answers
+while asking once per distinct path: the root is canonicalized once and each directory's ancestor
+answer is kept.
 
 ## Limits (explicit)
 
@@ -518,6 +521,13 @@ For the same reason the token digest is **canonical**: it counts ordinary tokens
 annotation token the parser substitutes for a pragma. The pragma itself is still compared, as an
 event.
 
+The consumer capture stops at the boundary: once the wrapper's exit has been captured, its AST
+consumer declines the next top-level declaration, which is `ParseAST`'s own early exit, so the rest
+of the unit is not parsed a second time. Every axis is complete at that point (events, tokens and
+files inside the window; the macro table and `__COUNTER__` at the exit), and errors after the
+boundary were never prefix errors. The producer capture still runs to the end of its source, since
+it verifies that the source pulls in the wrapper and nothing else.
+
 Five axes must agree: the ordered preprocessor event digest (definitions, undefinitions, expansions
 **with their actual argument tokens**, condition and include outcomes, pragma events), the canonical
 token stream, the macro table including parameter names, order and variadic flags, `__COUNTER__`, and
@@ -540,7 +550,11 @@ axes it compared. This is possible precisely because all three runs measure the 
 only which files were entered would be strictly weaker, because a file appearing between validation
 and the final parse can flip a `__has_include` or a conditional without any new file being entered.
 Filesystem **query outcomes** are frozen too — a path absent during validation stays absent — so that
-class of change is prevented as well as detected.
+class of change is prevented as well as detected. An absent `status` answer and a failed open are
+replayed for the rest of the snapshot, before and after sealing, so the include search asks the
+filesystem once per missing path. A second spelling of an already frozen file (case alias, hard
+link) is recognised by the physical identity (volume and file index) of the handle just opened, not
+by comparing it with every frozen file.
 
 The consumer capture runs on the **exact replay argument list**, so what is proven is literally what
 is replayed. Implicit binary-PCH substitution is suppressed by an empty, deterministic, **in-memory**

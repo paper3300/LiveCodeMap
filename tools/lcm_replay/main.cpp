@@ -64,7 +64,8 @@ struct Options {
 };
 
 void usage() {
-  std::cerr << "usage: lcm_replay --repo <dir> --resource-dir <dir> --directory <dir> --source <file>\n"
+  std::cerr << "usage: lcm_replay --config <profiles.json> [--profile <name>] --unit <name> --out <report.json>\n"
+               "       lcm_replay --repo <dir> --resource-dir <dir> --directory <dir> --source <file>\n"
                "                  --arg <token> [--arg <token> ...]\n"
                "                  [--producer-source <file> --producer-arg <token> ...]\n"
                "                  --out <report.json>\n"
@@ -351,6 +352,9 @@ json fact_evidence_json(const AnalysisResult& result, const std::optional<RepoRe
 
 int main(int argc, char** argv) {
   Options options;
+  fs::path config_file;
+  std::string profile_name;
+  std::string unit_name;
   // A malformed numeric value is a usage error with a message, never an
   // uncaught exception that loses the reason.
   const auto number = [](const std::string& flag, const std::string& text) -> long long {
@@ -373,7 +377,10 @@ int main(int argc, char** argv) {
       }
       return argv[++i];
     };
-    if (flag == "--repo") options.repository_root = path_from_utf8(next("--repo"));
+    if (flag == "--config") config_file = path_from_utf8(next("--config"));
+    else if (flag == "--profile") profile_name = next("--profile");
+    else if (flag == "--unit") unit_name = next("--unit");
+    else if (flag == "--repo") options.repository_root = path_from_utf8(next("--repo"));
     else if (flag == "--resource-dir") options.resource_dir = path_from_utf8(next("--resource-dir"));
     else if (flag == "--directory") options.directory = path_from_utf8(next("--directory"));
     else if (flag == "--source") options.source = path_from_utf8(next("--source"));
@@ -391,6 +398,56 @@ int main(int argc, char** argv) {
       usage();
       return exit_usage;
     }
+  }
+  if (!config_file.empty()) {
+    if (!options.repository_root.empty() || !options.resource_dir.empty() || !options.directory.empty() ||
+        !options.source.empty() || !options.arguments.empty() || !options.producer_source.empty() ||
+        !options.producer_arguments.empty() || !options.expect_type.empty() || options.expect_direct_bases >= 0 ||
+        options.expect_virtual_bases >= 0 || options.expect_direct_includes >= 0 || options.evidence_limit != 200 ||
+        unit_name.empty()) {
+      std::cerr << "--config requires --unit and cannot be mixed with manual analysis inputs\n";
+      return exit_usage;
+    }
+    try {
+      std::ifstream in(config_file, std::ios::binary);
+      if (!in) throw std::runtime_error("cannot open profile config");
+      const json config = json::parse(in);
+      if (config.at("schema").get<std::string>() != "lcm.replay-profiles.v1") {
+        throw std::runtime_error("unsupported profile config schema");
+      }
+      if (profile_name.empty()) profile_name = config.at("active_profile").get<std::string>();
+      const json& profile = config.at("profiles").at(profile_name);
+      const json& unit = profile.at("units").at(unit_name);
+      options.repository_root = path_from_utf8(config.at("repository_root").get<std::string>());
+      options.resource_dir = path_from_utf8(config.at("resource_dir").get<std::string>());
+      options.directory = path_from_utf8(profile.at("directory").get<std::string>());
+      options.source = path_from_utf8(unit.at("source").get<std::string>());
+      options.arguments = unit.at("arguments").get<std::vector<std::string>>();
+      if (unit.contains("producer_source")) {
+        options.producer_source = path_from_utf8(unit.at("producer_source").get<std::string>());
+      }
+      if (unit.contains("producer_arguments")) {
+        options.producer_arguments = unit.at("producer_arguments").get<std::vector<std::string>>();
+      }
+      options.expect_type = unit.value("expect_type", std::string{});
+      options.expect_direct_bases = unit.value("expect_direct_bases", -1LL);
+      options.expect_virtual_bases = unit.value("expect_virtual_bases", -1LL);
+      options.expect_direct_includes = unit.value("expect_direct_includes", -1LL);
+      options.evidence_limit = unit.value("evidence_limit", 200LL);
+      if (!options.repository_root.is_absolute() || !options.resource_dir.is_absolute() ||
+          !options.directory.is_absolute() || !options.source.is_absolute() ||
+          (!options.producer_source.empty() && !options.producer_source.is_absolute()) ||
+          options.expect_direct_bases < -1 || options.expect_virtual_bases < -1 ||
+          options.expect_direct_includes < -1 || options.evidence_limit < 0) {
+        throw std::runtime_error("profile paths must be absolute and expected counts must be non-negative");
+      }
+    } catch (const std::exception& error) {
+      std::cerr << "invalid profile config " << path_to_utf8_generic(config_file) << ": " << error.what() << "\n";
+      return exit_bad_input;
+    }
+  } else if (!profile_name.empty() || !unit_name.empty()) {
+    std::cerr << "--profile and --unit require --config\n";
+    return exit_usage;
   }
   if (options.repository_root.empty() || options.resource_dir.empty() || options.directory.empty() ||
       options.source.empty() || options.arguments.empty() || options.out.empty()) {
@@ -472,6 +529,10 @@ int main(int argc, char** argv) {
   json report;
   report["schema"] = "lcm.replay-report.v1";
   report["tool"] = "lcm_replay";
+  if (!config_file.empty()) {
+    report["profile"] = profile_name;
+    report["selected_unit"] = unit_name;
+  }
   report["elapsed_ms"] = elapsed.count();
   report["repository_root"] = path_to_utf8_generic(request.repository_root);
   report["resource_dir"] = path_to_utf8_generic(request.resource_dir);

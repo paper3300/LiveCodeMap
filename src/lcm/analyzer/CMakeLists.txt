@@ -5,11 +5,13 @@ add_library(lcm_analyzer STATIC
   analyzer.cpp
   pch_replay.cpp
   safety.cpp
-  facts_builder.cpp)
+  facts_builder.cpp
+  store_adapter.cpp
+  profile_index.cpp)
 
 get_filename_component(_lcm_src_root "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 target_include_directories(lcm_analyzer PUBLIC ${_lcm_src_root})
 target_link_libraries(lcm_analyzer
-  PUBLIC lcm_core clangTooling clangFrontend clangAnalysis clangAST clangBasic clangLex
+  PUBLIC lcm_core lcm_store clangTooling clangFrontend clangAnalysis clangAST clangBasic clangLex
   PRIVATE lcm_warnings)
 lcm_configure_clang_target(lcm_analyzer)

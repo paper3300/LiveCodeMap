@@ -329,6 +329,15 @@ StableId FactSet::add_external_placeholder(const CanonicalKey& key) {
   return id;
 }
 
+StableId FactSet::add_endpoint_only(const CanonicalKey& key) {
+  StableId id = make_stable_id(key);
+  auto [it, inserted] = symbols_.try_emplace(id, Symbol{id, key, {}, SymbolPresence::endpoint_only});
+  if (!inserted && it->second.key != key) {
+    throw std::logic_error("stable id collision between different canonical keys: " + id.value);
+  }
+  return id;
+}
+
 StableId FactSet::add_hidden_member(const CanonicalKey& key, SymbolLocation location) {
   if (location.analysis_unit.empty()) throw std::invalid_argument("hidden member requires an analysis unit");
   if (location.role != LocationRole::implicit_declaration) {

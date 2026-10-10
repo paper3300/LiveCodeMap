@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.30)
 project(LiveCodeMap
   VERSION 0.0.1
   DESCRIPTION "C++/Unreal code exploration and context layer"
-  LANGUAGES CXX)
+  LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -35,9 +35,13 @@ endif()
 
 add_subdirectory(src)
 
+# Read-only query CLI and MCP server; Clang-free.
+add_subdirectory(tools/livecodemap)
+
 # Single-TU replay tool; needs the Clang-based analyzer.
 if(LCM_CLANG_FOUND)
   add_subdirectory(tools/lcm_replay)
+  add_subdirectory(tools/lcm_index)
 endif()
 
 if(LCM_BUILD_TESTS)

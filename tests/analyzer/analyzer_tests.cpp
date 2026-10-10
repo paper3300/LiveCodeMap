@@ -2921,6 +2921,20 @@ struct D : virtual B, private C {};
   }
   CHECK(extends_count == 5);
 
+  // Publishing a contribution must retain a location-less relation endpoint.
+  AnalysisResult endpoint_result = one;
+  endpoint_result.facts = FactSet{};
+  endpoint_result.facts.add_endpoint_only(a->key);
+  endpoint_result.facts.add_symbol_location(b->key, b->locations.front());
+  const Relation* ba = extends_relation(f, b->id, a->id);
+  REQUIRE(ba);
+  endpoint_result.facts.add_relation_evidence(ba->key, ba->evidence.front());
+  FactSet endpoint_graph;
+  REQUIRE(publish_contribution(endpoint_graph, endpoint_result).published);
+  REQUIRE(endpoint_graph.symbols().count(a->id) == 1);
+  CHECK(endpoint_graph.symbols().at(a->id).presence == SymbolPresence::endpoint_only);
+  CHECK(extends_relation(endpoint_graph, b->id, a->id) != nullptr);
+
   // Two units contribute the same base evidence with their own ownership.
   FactSet merged;
   REQUIRE(publish_contribution(merged, one).published);

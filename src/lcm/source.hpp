@@ -2,8 +2,10 @@
 // hashes and hash-verified snippet extraction (PRD FR-RET-004, FR-IDX-004).
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -68,6 +70,27 @@ struct RepoRelativePath {
 [[nodiscard]] std::optional<RepoRelativePath> make_repo_relative_on_disk(const std::filesystem::path& root,
                                                                          const std::filesystem::path& absolute);
 
+// make_repo_relative_on_disk() for many paths under one root, with the same
+// result for every call. The root is canonicalized once, the ancestor-identity
+// answer of each directory is asked once and every result is kept per spelled
+// path, so the filesystem is consulted once per distinct path. The answers are
+// those of the moment they were first asked: use one resolver for one bounded
+// operation (one analysis), never across runs.
+class RepoPathResolver {
+ public:
+  explicit RepoPathResolver(std::filesystem::path root);
+  [[nodiscard]] std::optional<RepoRelativePath> resolve(const std::filesystem::path& absolute);
+
+ private:
+  std::optional<RepoRelativePath> compute(const std::filesystem::path& absolute);
+
+  std::filesystem::path root_;
+  bool root_resolved_ = false;
+  std::optional<std::filesystem::path> canonical_root_;  // nullopt: canonical(root) failed
+  std::map<std::filesystem::path::string_type, bool> is_root_;  // canonical directory -> same object as the root
+  std::map<std::filesystem::path::string_type, std::optional<RepoRelativePath>> results_;  // spelled path -> result
+};
+
 // Comparison key for paths that may not exist on disk: lexically normal
 // generic UTF-8 form without trailing slash. On Windows ASCII letters are
 // folded to lower case (drive letters, typical build-tool casing). Non-ASCII
@@ -79,6 +102,20 @@ struct RepoRelativePath {
 // according to the filesystem (case/normalisation rules of the volume apply).
 // False when either does not exist.
 [[nodiscard]] bool same_existing_file(const std::filesystem::path& a, const std::filesystem::path& b);
+
+// Physical identity of an existing file or directory, the notion
+// same_existing_file() compares: on Windows the volume serial number and
+// FILE_ID_INFO file id of a handle opened for attribute reading (with the
+// GetFileInformationByHandle fallback std::filesystem::equivalent uses), on
+// POSIX st_dev/st_ino. nullopt when the path cannot be opened. Two identities
+// taken at different times compare like equivalent() only while neither file
+// is replaced in between (ids are stable on NTFS, not on every filesystem).
+struct FileIdentity {
+  std::uint64_t volume = 0;
+  std::array<std::uint8_t, 16> file{};
+  friend bool operator==(const FileIdentity&, const FileIdentity&) = default;
+};
+[[nodiscard]] std::optional<FileIdentity> existing_file_identity(const std::filesystem::path& path);
 
 // Half-open byte range [begin_offset, end_offset) plus 1-based line/column
 // (column counted in bytes) of both ends.

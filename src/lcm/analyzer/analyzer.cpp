@@ -18,6 +18,7 @@
 
 #include "lcm/analyzer/facts_builder.hpp"
 #include "lcm/hash.hpp"
+#include "lcm/analyzer/driver_phase.hpp"
 #include "lcm/analyzer/pch_replay_internal.hpp"
 #include "lcm/analyzer/safety.hpp"
 
@@ -93,6 +94,10 @@ class PrefixCheckedAction : public clang::WrapperFrontendAction {
       : WrapperFrontendAction(std::move(wrapped)), observer_(observer) {}
 
  protected:
+  bool PrepareToExecuteAction(clang::CompilerInstance& ci) override {
+    detail::DriverPhase::end();
+    return WrapperFrontendAction::PrepareToExecuteAction(ci);
+  }
   bool BeginSourceFileAction(clang::CompilerInstance& ci) override {
     if (!WrapperFrontendAction::BeginSourceFileAction(ci)) return false;
     observer_.attach(ci.getPreprocessor());
@@ -337,7 +342,11 @@ AnalysisResult analyze_translation_unit(const AnalysisRequest& request) {
   }
   clang::tooling::ToolInvocation invocation(argv, std::move(action), files.get());
   invocation.setDiagnosticConsumer(&diagnostics);
-  const bool ran = invocation.run();
+  bool ran = false;
+  {
+    detail::DriverPhase driver_phase;  // ends in AnalyzerAction::PrepareToExecuteAction
+    ran = invocation.run();
+  }
 
   if (prefix_observer) {
     result.pch.final_parse = prefix_observer->finish();
@@ -402,6 +411,10 @@ PublishOutcome publish_contribution(FactSet& target, const AnalysisResult& resul
     if (symbol.presence == SymbolPresence::external_placeholder) {
       target.add_external_placeholder(symbol.key);
       ++outcome.placeholders;
+      continue;
+    }
+    if (symbol.presence == SymbolPresence::endpoint_only) {
+      target.add_endpoint_only(symbol.key);
       continue;
     }
     for (const auto& location : symbol.locations) {

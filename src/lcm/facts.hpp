@@ -377,6 +377,12 @@ class FactSet {
   // Registers an out-of-root symbol that is referenced but not indexed.
   StableId add_external_placeholder(const CanonicalKey& key);
 
+  // Registers a symbol known only as a surviving evidence endpoint (storage
+  // reconstruction, visibility projections). A new symbol is `endpoint_only`;
+  // an existing one is left unchanged, and adding a location later makes it
+  // indexed as usual.
+  StableId add_endpoint_only(const CanonicalKey& key);
+
   // Attaches a contribution-owned `implicit_declaration` location to a
   // compiler-synthesized member referenced by a fact. The symbol stays
   // `implicit_hidden` (never `indexed`) unless a unit contributes a real

@@ -2,6 +2,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstring>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#endif
 
 namespace lcm {
 
@@ -75,15 +85,39 @@ std::optional<RepoRelativePath> make_repo_relative(const std::filesystem::path& 
 
 std::optional<RepoRelativePath> make_repo_relative_on_disk(const std::filesystem::path& root,
                                                            const std::filesystem::path& absolute) {
-  auto lexical = make_repo_relative(root, absolute);
+  return RepoPathResolver(root).resolve(absolute);
+}
+
+RepoPathResolver::RepoPathResolver(std::filesystem::path root) : root_(std::move(root)) {}
+
+std::optional<RepoRelativePath> RepoPathResolver::resolve(const std::filesystem::path& absolute) {
+  if (auto it = results_.find(absolute.native()); it != results_.end()) return it->second;
+  auto result = compute(absolute);
+  results_.emplace(absolute.native(), result);
+  return result;
+}
+
+std::optional<RepoRelativePath> RepoPathResolver::compute(const std::filesystem::path& absolute) {
+  auto lexical = make_repo_relative(root_, absolute);
   std::error_code ec;
   if (!std::filesystem::exists(absolute, ec) || ec) return lexical;
 
-  std::error_code root_ec;
-  const std::filesystem::path canonical_root = std::filesystem::canonical(root, root_ec);
+  if (!root_resolved_) {
+    root_resolved_ = true;
+    std::error_code root_ec;
+    std::filesystem::path canonical = std::filesystem::canonical(root_, root_ec);
+    if (!root_ec) canonical_root_ = std::move(canonical);
+  }
   std::error_code abs_ec;
   const std::filesystem::path canonical_abs = std::filesystem::canonical(absolute, abs_ec);
-  if (root_ec || abs_ec) return lexical;
+  if (!canonical_root_ || abs_ec) return lexical;
+  const std::filesystem::path& canonical_root = *canonical_root_;
+  // Asked once per canonical directory: many files share their ancestors.
+  const auto is_root = [&](const std::filesystem::path& p) {
+    auto [it, fresh] = is_root_.try_emplace(p.native(), false);
+    if (fresh) it->second = same_existing_file(p, canonical_root);
+    return it->second;
+  };
 
   // Containment by filesystem ancestry: walk up from the file until an
   // ancestor is the same directory object as the root. Spelling is never
@@ -92,14 +126,14 @@ std::optional<RepoRelativePath> make_repo_relative_on_disk(const std::filesystem
   // path components resolve to the same objects and are inside. Symlinks are
   // followed by canonical(): a link inside the root pointing outside is
   // outside.
-  if (same_existing_file(canonical_abs, canonical_root)) return RepoRelativePath{std::string{}, std::string{}};
+  if (is_root(canonical_abs)) return RepoRelativePath{std::string{}, std::string{}};
   std::vector<std::string> tail;
   std::filesystem::path cursor = canonical_abs;
   while (true) {
     const std::filesystem::path parent = cursor.parent_path();
     if (parent.empty() || parent == cursor) return std::nullopt;  // reached the volume root
     tail.push_back(path_to_utf8_generic(cursor.filename()));
-    if (same_existing_file(parent, canonical_root)) break;
+    if (is_root(parent)) break;
     cursor = parent;
   }
   std::string generic;
@@ -127,6 +161,41 @@ bool same_existing_file(const std::filesystem::path& a, const std::filesystem::p
   std::error_code ec;
   const bool same = std::filesystem::equivalent(a, b, ec);
   return !ec && same;
+}
+
+std::optional<FileIdentity> existing_file_identity(const std::filesystem::path& path) {
+  FileIdentity identity;
+#ifdef _WIN32
+  // The same handle and id query as the standard library's equivalent().
+  const HANDLE handle = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                    nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) return std::nullopt;
+  FILE_ID_INFO info{};
+  bool ok = GetFileInformationByHandleEx(handle, FileIdInfo, &info, sizeof(info)) != 0;
+  if (ok) {
+    identity.volume = info.VolumeSerialNumber;
+    static_assert(sizeof(info.FileId.Identifier) == 16);
+    std::memcpy(identity.file.data(), info.FileId.Identifier, 16);
+  } else {
+    const DWORD error = GetLastError();
+    BY_HANDLE_FILE_INFORMATION legacy{};
+    if ((error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_PARAMETER) && GetFileInformationByHandle(handle, &legacy)) {
+      ok = true;
+      identity.volume = legacy.dwVolumeSerialNumber;
+      std::memcpy(identity.file.data(), &legacy.nFileIndexHigh, 4);
+      std::memcpy(identity.file.data() + 4, &legacy.nFileIndexLow, 4);
+    }
+  }
+  CloseHandle(handle);
+  if (!ok) return std::nullopt;
+#else
+  struct stat st {};
+  if (::stat(path.c_str(), &st) != 0) return std::nullopt;
+  identity.volume = static_cast<std::uint64_t>(st.st_dev);
+  const auto inode = static_cast<std::uint64_t>(st.st_ino);
+  std::memcpy(identity.file.data(), &inode, sizeof(inode));
+#endif
+  return identity;
 }
 
 FileContentHash hash_file_content(std::string_view bytes) { return FileContentHash{sha256(bytes), bytes.size()}; }

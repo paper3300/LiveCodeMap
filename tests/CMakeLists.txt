@@ -16,6 +16,9 @@ target_compile_definitions(lcm_core_tests PRIVATE
 
 add_test(NAME lcm_core_tests COMMAND lcm_core_tests)
 
+add_subdirectory(store)
+add_subdirectory(query)
+
 if(LCM_CLANG_FOUND)
   add_subdirectory(clang)
   add_subdirectory(analyzer)

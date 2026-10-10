@@ -347,6 +347,7 @@ class FactsVisitor : public clang::RecursiveASTVisitor<FactsVisitor> {
       pending_hidden_.pop_front();
       process_hidden_member(fd);
     }
+    materialize_evidence_endpoints();
     finalize_files();
     finalize_includes();
   }
@@ -1933,7 +1934,10 @@ class FactsVisitor : public clang::RecursiveASTVisitor<FactsVisitor> {
     if (cached != ids_.end()) return cached->second;
     const auto key = lambda_key(closure);
     std::optional<StableId> id;
-    if (key && !validate_canonical_key(*key)) id = make_stable_id(*key);
+    if (key && !validate_canonical_key(*key)) {
+      id = make_stable_id(*key);
+      keys_by_id_.emplace(*id, *key);
+    }
     ids_.emplace(closure, id);
     return id;
   }
@@ -2080,6 +2084,7 @@ class FactsVisitor : public clang::RecursiveASTVisitor<FactsVisitor> {
       } else {
         id = make_stable_id(*key);
         keys_.emplace(canonical, *key);
+        keys_by_id_.emplace(*id, *key);
       }
     }
     ids_[canonical] = id;
@@ -2162,6 +2167,28 @@ class FactsVisitor : public clang::RecursiveASTVisitor<FactsVisitor> {
     facts_.add_relation_evidence(RelationKey{source, target, kind, Confidence::confirmed}, std::move(e));
   }
 
+  // A referenced in-root declaration may have an identity but no usable
+  // declaration span (for example, a parent of a macro-expanded member).
+  // Preserve only endpoints that actually occur in evidence, without inventing
+  // a source location for them.
+  void materialize_evidence_endpoints() {
+    const auto add_if_missing = [&](const StableId& id) {
+      if (facts_.symbols().count(id)) return;
+      const CanonicalKey& key = keys_by_id_.at(id);
+      if (key.repository_member == kExternalMember) {
+        facts_.add_external_placeholder(key);
+      } else {
+        facts_.add_endpoint_only(key);
+      }
+    };
+    for (const auto& [key, relation] : facts_.relations()) {
+      add_if_missing(key.source);
+      add_if_missing(key.target);
+    }
+    for (const auto& site : facts_.unresolved_sites()) add_if_missing(site.enclosing);
+    for (const auto& capture : facts_.captures()) add_if_missing(capture.lambda);
+  }
+
   void record_unresolved(const StableId& owner, const clang::CallExpr* call, const SourceLocation& loc,
                          std::optional<UnresolvedReason> forced = std::nullopt) {
     UnresolvedSite site;
@@ -2198,7 +2225,7 @@ class FactsVisitor : public clang::RecursiveASTVisitor<FactsVisitor> {
     fi.lines.emplace(std::string_view(fi.buffer.data(), fi.buffer.size()));
     fi.is_system = clang::SrcMgr::isSystem(sm_.getFileCharacteristic(sm_.getLocForStartOfFile(fid)));
     if (!fi.abs_utf8.empty()) {
-      fi.repo = make_repo_relative_on_disk(unit_.request->repository_root, path_from_utf8(fi.abs_utf8));
+      fi.repo = unit_.repo_path(path_from_utf8(fi.abs_utf8));
       fi.in_root = fi.repo.has_value();
     }
     return files_.emplace(fid, std::move(fi)).first->second;
@@ -2532,8 +2559,7 @@ class FactsVisitor : public clang::RecursiveASTVisitor<FactsVisitor> {
       active.expanded_spelling = processed.expanded_spelling;
       if (!processed.found) {
         active.resolution = IncludeResolution::not_found;
-      } else if (const auto repo = make_repo_relative_on_disk(unit_.request->repository_root,
-                                                              path_from_utf8(processed.resolved_path_utf8))) {
+      } else if (const auto repo = unit_.repo_path(path_from_utf8(processed.resolved_path_utf8))) {
         active.resolution = IncludeResolution::resolved_internal;
         active.resolved_repo_target = *repo;
       } else {
@@ -2611,6 +2637,7 @@ class FactsVisitor : public clang::RecursiveASTVisitor<FactsVisitor> {
   std::map<const clang::Decl*, LocalInfo> local_tags_;
   std::map<const clang::Decl*, std::optional<StableId>> ids_;
   std::map<const clang::Decl*, CanonicalKey> keys_;
+  std::map<StableId, CanonicalKey> keys_by_id_;
 
   std::vector<StableId> owners_;                        // attribution stack
   std::vector<EvaluationContext> evaluation_context_;   // default argument / member init / init capture
@@ -2648,7 +2675,7 @@ class PPObserver : public clang::PPCallbacks {
     const clang::FileID fid = sm_.getFileID(loc);
     obs.includer_path_utf8 = absolute_utf8_path(sm_, fid);
     if (!obs.includer_path_utf8.empty()) {
-      obs.includer_repo_path = make_repo_relative_on_disk(unit_.request->repository_root, path_from_utf8(obs.includer_path_utf8));
+      obs.includer_repo_path = unit_.repo_path(path_from_utf8(obs.includer_path_utf8));
     }
     obs.spelling = std::string(file_name);
     obs.angled = is_angled;
@@ -2659,7 +2686,7 @@ class PPObserver : public clang::PPCallbacks {
       (void)sm_.getFileManager().getVirtualFileSystem().makeAbsolute(path);
       llvm::sys::path::remove_dots(path, true);
       obs.resolved_path_utf8 = std::string(path.str());
-      obs.resolved_repo_path = make_repo_relative_on_disk(unit_.request->repository_root, path_from_utf8(*obs.resolved_path_utf8));
+      obs.resolved_repo_path = unit_.repo_path(path_from_utf8(*obs.resolved_path_utf8));
       obs.resolved_in_root = obs.resolved_repo_path.has_value();
       obs_resolved = obs.resolved_path_utf8;
     }

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 #include "lcm/source.hpp"
 #include "support/case_sensitive_dir.hpp"
@@ -188,6 +189,70 @@ TEST_CASE("on-disk containment is decided by filesystem ancestry: a case-distinc
   CHECK(ghost->generic == "missing.cpp");
 }
 #endif
+
+TEST_CASE("RepoPathResolver answers exactly like make_repo_relative_on_disk, asking once per path") {
+  TempTree tree("lcm-resolver-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  tree.write("Root/src/a.cpp", "int a;\n");
+  tree.write("Root/src/deep/b.h", "int b;\n");
+  tree.write("Outside/c.h", "int c;\n");
+  const fs::path root = tree.root / "Root";
+  std::vector<fs::path> queries{root / "src" / "a.cpp",
+                                root / "src" / "deep" / "b.h",
+                                root / lcm::path_from_utf8("src/./deep/../a.cpp"),
+                                tree.root / "Outside" / "c.h",
+                                root / "missing.h",
+                                tree.root / "Outside" / "missing.h",
+                                root,
+                                root / "src"};
+#ifdef _WIN32
+  queries.push_back(root / "SRC" / "A.CPP");  // a case alias of an existing file
+#endif
+  lcm::RepoPathResolver resolver(root);
+  for (int round = 0; round < 2; ++round) {
+    for (const auto& q : queries) {
+      CAPTURE(lcm::path_to_utf8_generic(q));
+      CAPTURE(round);
+      const auto expected = lcm::make_repo_relative_on_disk(root, q);
+      const auto got = resolver.resolve(q);
+      REQUIRE(expected.has_value() == got.has_value());
+      if (!expected) continue;
+      CHECK(got->generic == expected->generic);
+      CHECK(got->as_written == expected->as_written);
+    }
+  }
+  // One resolver keeps the answer it gave (it serves one bounded operation):
+  // the file disappearing afterwards does not change that answer.
+  const auto before = resolver.resolve(root / "src" / "a.cpp");
+  REQUIRE(before);
+  fs::remove(root / "src" / "a.cpp");
+  REQUIRE(resolver.resolve(root / "src" / "a.cpp"));
+  CHECK(resolver.resolve(root / "src" / "a.cpp")->generic == before->generic);
+}
+
+TEST_CASE("existing_file_identity compares exactly like same_existing_file") {
+  TempTree tree("lcm-identity-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  tree.write("dir/a.cpp", "int a;\n");
+  tree.write("dir/b.cpp", "int b;\n");
+  const fs::path a = tree.root / "dir" / "a.cpp";
+  std::vector<fs::path> paths{a, tree.root / "dir" / "b.cpp", tree.root / "dir", tree.root / "dir" / "missing.cpp",
+                              tree.root / lcm::path_from_utf8("dir/./sub/../a.cpp")};
+  std::error_code ec;
+  fs::create_hard_link(a, tree.root / "dir" / "hard.cpp", ec);
+  if (!ec) paths.push_back(tree.root / "dir" / "hard.cpp");
+#ifdef _WIN32
+  paths.push_back(tree.root / "DIR" / "A.CPP");  // case alias
+#endif
+  for (const auto& x : paths) {
+    for (const auto& y : paths) {
+      CAPTURE(lcm::path_to_utf8_generic(x));
+      CAPTURE(lcm::path_to_utf8_generic(y));
+      const auto ix = lcm::existing_file_identity(x);
+      const auto iy = lcm::existing_file_identity(y);
+      CHECK((ix && iy && *ix == *iy) == lcm::same_existing_file(x, y));
+    }
+  }
+  CHECK_FALSE(lcm::existing_file_identity(tree.root / "dir" / "missing.cpp"));
+}
 
 TEST_CASE("is_canonical_repo_relative accepts only normalised relative spellings") {
   CHECK(lcm::is_canonical_repo_relative("src/a.cpp"));

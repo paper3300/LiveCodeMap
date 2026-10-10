@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -89,14 +90,33 @@ class CompilationDatabase {
  public:
   std::vector<CompileCommand> commands;  // database order
 
-  // Every command whose resolved file matches `file` (compared via path_key).
-  // A relative `file` is resolved against `base` when provided.
+  CompilationDatabase();
+  CompilationDatabase(const CompilationDatabase& other);  // commands only; the copy asks the filesystem itself
+  CompilationDatabase& operator=(const CompilationDatabase& other);
+  CompilationDatabase(CompilationDatabase&&) noexcept;
+  CompilationDatabase& operator=(CompilationDatabase&&) noexcept;
+  ~CompilationDatabase();
+
+  // Every command whose resolved file matches `file`. When both the queried
+  // file and a command's file exist, the filesystem decides (same physical
+  // file, see existing_file_identity: case aliases and hard links match,
+  // distinct case-sensitive files do not); otherwise path_key() does. A
+  // relative `file` is resolved against `base` when provided.
+  //
+  // Each command's file is asked about once per database, at the first lookup
+  // (and again only when `commands` changed): existence, identity and lexical
+  // key are kept, so a lookup costs one filesystem query for the queried file
+  // instead of one per entry. Safe to call from several threads.
   [[nodiscard]] std::vector<const CompileCommand*> commands_for_file(
       const std::filesystem::path& file, const std::filesystem::path& base = {}) const;
 
   // Unique when all commands for the file share one command identity.
   [[nodiscard]] CommandSelection select_unique(const std::filesystem::path& file,
                                                const std::filesystem::path& base = {}) const;
+
+ private:
+  struct FileIndex;
+  mutable std::shared_ptr<FileIndex> file_index_;
 };
 
 struct CompileDbParseOptions {

@@ -1,0 +1,3 @@
+add_executable(lcm_index main.cpp)
+target_link_libraries(lcm_index PRIVATE lcm_analyzer nlohmann_json lcm_warnings)
+lcm_configure_clang_target(lcm_index)

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <mutex>
 
 #include <nlohmann/json.hpp>
 
@@ -316,6 +317,32 @@ TokenizedCommand tokenize_command_line(std::string_view command, CommandSyntax s
   return syntax == CommandSyntax::windows ? tokenize_windows(command) : tokenize_gnu(command);
 }
 
+// What the filesystem said about each command's file, asked once.
+struct CompilationDatabase::FileIndex {
+  struct Entry {
+    std::filesystem::path::string_type file;  // the spelling this entry describes
+    std::string key;                          // path_key(file)
+    bool exists = false;
+    std::optional<FileIdentity> identity;     // when it exists and could be opened
+  };
+  std::mutex mutex;
+  std::vector<Entry> entries;
+};
+
+CompilationDatabase::CompilationDatabase() : file_index_(std::make_shared<FileIndex>()) {}
+CompilationDatabase::CompilationDatabase(const CompilationDatabase& other)
+    : commands(other.commands), file_index_(std::make_shared<FileIndex>()) {}
+CompilationDatabase& CompilationDatabase::operator=(const CompilationDatabase& other) {
+  if (this != &other) {
+    commands = other.commands;
+    file_index_ = std::make_shared<FileIndex>();
+  }
+  return *this;
+}
+CompilationDatabase::CompilationDatabase(CompilationDatabase&&) noexcept = default;
+CompilationDatabase& CompilationDatabase::operator=(CompilationDatabase&&) noexcept = default;
+CompilationDatabase::~CompilationDatabase() = default;
+
 std::vector<const CompileCommand*> CompilationDatabase::commands_for_file(const std::filesystem::path& file,
                                                                            const std::filesystem::path& base) const {
   const std::filesystem::path resolved = (file.is_absolute() || base.empty()) ? file : base / file;
@@ -323,15 +350,37 @@ std::vector<const CompileCommand*> CompilationDatabase::commands_for_file(const 
   // When both the queried file and a command's file exist, the filesystem is
   // authoritative (aliases of one file match; distinct case-sensitive files
   // never merge). The lexical key is only the fallback when an existing-file
-  // comparison is not possible.
+  // comparison is not possible. A command whose file exists but cannot be
+  // opened matches nothing that exists, exactly as same_existing_file().
   std::error_code ec;
   const bool query_exists = std::filesystem::exists(resolved, ec) && !ec;
+  const std::optional<FileIdentity> query_identity =
+      query_exists ? existing_file_identity(resolved) : std::optional<FileIdentity>();
+  if (!file_index_) file_index_ = std::make_shared<FileIndex>();  // a moved-from database
+  FileIndex& index = *file_index_;
+  const std::lock_guard<std::mutex> lock(index.mutex);
+  bool current = index.entries.size() == commands.size();
+  for (std::size_t i = 0; current && i < commands.size(); ++i) current = index.entries[i].file == commands[i].file.native();
+  if (!current) {
+    index.entries.clear();
+    index.entries.reserve(commands.size());
+    for (const auto& command : commands) {
+      FileIndex::Entry entry;
+      entry.file = command.file.native();
+      entry.key = path_key(command.file);
+      std::error_code ec2;
+      entry.exists = std::filesystem::exists(command.file, ec2) && !ec2;
+      if (entry.exists) entry.identity = existing_file_identity(command.file);
+      index.entries.push_back(std::move(entry));
+    }
+  }
   std::vector<const CompileCommand*> out;
-  for (const auto& command : commands) {
-    std::error_code ec2;
-    const bool command_exists = query_exists && std::filesystem::exists(command.file, ec2) && !ec2;
-    const bool match = command_exists ? same_existing_file(command.file, resolved) : path_key(command.file) == key;
-    if (match) out.push_back(&command);
+  for (std::size_t i = 0; i < commands.size(); ++i) {
+    const FileIndex::Entry& entry = index.entries[i];
+    const bool match = query_exists && entry.exists
+                           ? query_identity && entry.identity && *query_identity == *entry.identity
+                           : entry.key == key;
+    if (match) out.push_back(&commands[i]);
   }
   return out;
 }

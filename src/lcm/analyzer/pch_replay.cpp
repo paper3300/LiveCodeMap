@@ -6,6 +6,7 @@
 #include <set>
 #include <optional>
 
+#include <clang/AST/ASTConsumer.h>
 #include <clang/Basic/FileManager.h>
 #include <clang/Basic/SourceManager.h>
 #include <clang/Frontend/CompilerInstance.h>
@@ -18,6 +19,7 @@
 #include <clang/Tooling/Tooling.h>
 #include <llvm/Support/MemoryBuffer.h>
 
+#include "lcm/analyzer/driver_phase.hpp"
 #include "lcm/analyzer/safety.hpp"
 #include "lcm/hash.hpp"
 #include "lcm/response_file.hpp"
@@ -141,6 +143,14 @@ struct FrozenFileSystem::Impl {
   llvm::IntrusiveRefCntPtr<llvm::vfs::InMemoryFileSystem> memory{new llvm::vfs::InMemoryFileSystem(true)};
   std::map<std::string, std::string> path_to_canonical;  // path_key -> canonical path
   std::map<std::string, Entry> entries;                  // canonical path -> entry
+  // Physical identity (volume + file index, from the status of the handle just
+  // opened) -> canonical path, so a second spelling of one file is recognised
+  // without asking the filesystem about every file frozen so far.
+  std::map<llvm::sys::fs::UniqueID, std::string> by_identity;
+  // Every failed open, with its error. Asked once: the answer is replayed for
+  // the rest of this snapshot, before and after sealing, exactly like an
+  // absent `status` answer.
+  std::map<std::string, std::error_code> open_failure;
   std::vector<Frozen> order;
   bool sealed = false;
   // Every path whose existence was ASKED ABOUT before sealing, and the answer.
@@ -186,12 +196,12 @@ llvm::ErrorOr<llvm::vfs::Status> FrozenFileSystem::status(const llvm::Twine& pat
   if (const auto it = impl_->path_to_canonical.find(key); it != impl_->path_to_canonical.end()) {
     return impl_->memory->status(it->second);
   }
-  if (impl_->sealed) {
-    // Replay the answer validation got, so a path that was absent then is still
-    // absent now however the real filesystem has changed.
-    if (const auto known = impl_->query_outcome.find(key); known != impl_->query_outcome.end()) {
-      if (!known->second) return std::make_error_code(std::errc::no_such_file_or_directory);
-    }
+  // Replay an absent answer already given, so a path that was absent then is
+  // still absent now however the real filesystem has changed. Before sealing
+  // this also keeps the capture runs of one snapshot consistent with each
+  // other and asks the filesystem once per missing path.
+  if (const auto known = impl_->query_outcome.find(key); known != impl_->query_outcome.end()) {
+    if (!known->second) return std::make_error_code(std::errc::no_such_file_or_directory);
   }
   // Also answer for paths the in-memory layer knows but the canonical map does
   // not -- in particular the PARENT DIRECTORIES of a virtual file. Clang's
@@ -211,18 +221,20 @@ llvm::ErrorOr<std::unique_ptr<llvm::vfs::File>> FrozenFileSystem::openFileForRea
   if (const auto it = impl_->path_to_canonical.find(key); it != impl_->path_to_canonical.end()) {
     return impl_->memory->openFileForRead(it->second);
   }
-  if (impl_->sealed) {
-    // A path recorded as ABSENT during validation stays absent, so an open
-    // cannot bypass the frozen query outcome that `status` replays.
-    if (const auto known = impl_->query_outcome.find(key);
-        known != impl_->query_outcome.end() && !known->second) {
-      return std::make_error_code(std::errc::no_such_file_or_directory);
-    }
+  // A path recorded as ABSENT stays absent, so an open cannot bypass the query
+  // outcome that `status` replays; a failed open replays its own error.
+  if (const auto known = impl_->query_outcome.find(key);
+      known != impl_->query_outcome.end() && !known->second) {
+    return std::make_error_code(std::errc::no_such_file_or_directory);
   }
+  if (const auto failed = impl_->open_failure.find(key); failed != impl_->open_failure.end()) return failed->second;
 
   // Not frozen yet: read it once from the physical filesystem and keep it.
   auto file = ProxyFileSystem::openFileForRead(path);
-  if (!file) return file;
+  if (!file) {
+    impl_->open_failure.emplace(key, file.getError());
+    return file;
+  }
   const auto st = (*file)->status();
   if (!st) return llvm::errorToErrorCode(llvm::createStringError(st.getError(), "status failed"));
   auto contents = (*file)->getBuffer(spelled, /*FileSize=*/-1, /*RequiresNullTerminator=*/true);
@@ -233,19 +245,10 @@ llvm::ErrorOr<std::unique_ptr<llvm::vfs::File>> FrozenFileSystem::openFileForRea
   // second spelling is registered as a hard link to the first rather than as a
   // second in-memory file. Without this one header reached through two include
   // prefixes would get two identities and `#pragma once` would stop working.
-  std::string canonical;
-  for (const auto& [existing_key, existing_path] : impl_->path_to_canonical) {
-    (void)existing_key;
-    const auto& entry = impl_->entries[existing_path];
-    if (entry.virtual_only) continue;
-    std::error_code ec;
-    if (same_existing_file(path_from_utf8(existing_path), path_from_utf8(spelled_str))) {
-      canonical = existing_path;
-      break;
-    }
-    (void)ec;
-  }
-  if (!canonical.empty()) {
+  // The identity comes from the handle just opened; virtual files have none.
+  const llvm::sys::fs::UniqueID identity = st->getUniqueID();
+  if (const auto alias = impl_->by_identity.find(identity); alias != impl_->by_identity.end()) {
+    const std::string& canonical = alias->second;
     impl_->memory->addHardLink(spelled_str, canonical);
     impl_->path_to_canonical[key] = canonical;
     return impl_->memory->openFileForRead(spelled_str);
@@ -255,6 +258,7 @@ llvm::ErrorOr<std::unique_ptr<llvm::vfs::File>> FrozenFileSystem::openFileForRea
   impl_->memory->addFile(spelled_str, 0, llvm::MemoryBuffer::getMemBufferCopy(bytes, spelled));
   impl_->path_to_canonical[key] = spelled_str;
   impl_->entries[spelled_str] = Entry{spelled_str, digest, bytes.size(), false};
+  impl_->by_identity.emplace(identity, spelled_str);
   impl_->order.push_back(Frozen{spelled_str, digest, bytes.size(), false});
   return impl_->memory->openFileForRead(spelled_str);
 }
@@ -548,9 +552,24 @@ void finish_capture(Capture& capture) {
 // axis would have been a weaker contract dressed up as a technical limitation.
 class CaptureAction : public clang::SyntaxOnlyAction {
  public:
-  explicit CaptureAction(Capture& capture) : capture_(capture) {}
+  CaptureAction(Capture& capture, bool stop_at_boundary) : capture_(capture), stop_at_boundary_(stop_at_boundary) {}
 
  protected:
+  // With `stop_at_boundary`, parsing ends at the first top-level declaration
+  // handed over once the prefix boundary was captured: everything measured
+  // (events, tokens and files inside the window, the macro table and counter
+  // at the wrapper's exit) is complete by then, and errors after the boundary
+  // are ignored anyway. A consumer returning false is ParseAST's own early
+  // exit; the rest of the unit is never parsed.
+  std::unique_ptr<clang::ASTConsumer> CreateASTConsumer(clang::CompilerInstance& ci, llvm::StringRef file) override {
+    if (!stop_at_boundary_) return clang::SyntaxOnlyAction::CreateASTConsumer(ci, file);
+    return std::make_unique<StopAtBoundary>(capture_);
+  }
+  // The CompilerInvocation exists: the driver phase is over (see DriverPhase).
+  bool PrepareToExecuteAction(clang::CompilerInstance& ci) override {
+    DriverPhase::end();
+    return clang::SyntaxOnlyAction::PrepareToExecuteAction(ci);
+  }
   bool BeginSourceFileAction(clang::CompilerInstance& ci) override {
     if (!clang::SyntaxOnlyAction::BeginSourceFileAction(ci)) return false;
     attach_prefix_recorder(ci.getPreprocessor(), capture_);
@@ -562,7 +581,17 @@ class CaptureAction : public clang::SyntaxOnlyAction {
   }
 
  private:
+  class StopAtBoundary : public clang::ASTConsumer {
+   public:
+    explicit StopAtBoundary(const Capture& capture) : capture_(capture) {}
+    bool HandleTopLevelDecl(clang::DeclGroupRef) override { return !capture_.boundary_captured; }
+
+   private:
+    const Capture& capture_;
+  };
+
   Capture& capture_;
+  bool stop_at_boundary_ = false;
 };
 
 class CaptureDiagnostics : public clang::DiagnosticConsumer {
@@ -626,7 +655,7 @@ namespace {
 CaptureResult capture_prefix(FrozenFileSystem& fs, const std::filesystem::path& directory,
                              const std::filesystem::path& resource_dir, const std::string& guard,
                              const std::string& wrapper, const std::vector<std::string>& options,
-                             const std::string& main_source, bool forced_prefix) {
+                             const std::string& main_source, bool forced_prefix, bool stop_at_boundary) {
   Capture capture;
   capture.wrapper_key = path_key(path_from_utf8(wrapper));
   capture.wrapper_path = path_from_utf8(wrapper);
@@ -648,9 +677,13 @@ CaptureResult capture_prefix(FrozenFileSystem& fs, const std::filesystem::path& 
   argv.push_back(main_source);
 
   CaptureDiagnostics diagnostics(capture.out.diagnostics, capture);
-  clang::tooling::ToolInvocation invocation(argv, std::make_unique<CaptureAction>(capture), files.get());
+  clang::tooling::ToolInvocation invocation(argv, std::make_unique<CaptureAction>(capture, stop_at_boundary),
+                                            files.get());
   invocation.setDiagnosticConsumer(&diagnostics);
-  invocation.run();
+  {
+    DriverPhase driver_phase;  // ends in CaptureAction::PrepareToExecuteAction
+    invocation.run();
+  }
   CaptureResult result;
   result.out = std::move(capture.out);
   result.top_level_entries = std::move(capture.top_level_entries);
@@ -1144,12 +1177,12 @@ PchReplayOutcome verify_pch_replay(const PchReplayRequest& request) {
   const std::string wrapper = path_to_utf8_generic(wrapper_path);
   CaptureResult producer_capture =
       capture_prefix(*frozen, producer.directory, request.resource_dir, guard_path, wrapper, capture_options(pc),
-                     path_to_utf8_generic(producer.file), /*forced_prefix=*/false);
+                     path_to_utf8_generic(producer.file), /*forced_prefix=*/false, /*stop_at_boundary=*/false);
   // The consumer capture IS the companion for the final parse: same frozen
   // filesystem, same working directory, and the exact replay argument list.
   CaptureResult consumer_capture =
       capture_prefix(*frozen, consumer.directory, request.resource_dir, guard_path, wrapper, replay_arguments,
-                     path_to_utf8_generic(consumer.file), /*forced_prefix=*/false);
+                     path_to_utf8_generic(consumer.file), /*forced_prefix=*/false, /*stop_at_boundary=*/true);
   replay.producer = producer_capture.out;
   replay.consumer = consumer_capture.out;
 

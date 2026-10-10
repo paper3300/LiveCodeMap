@@ -353,6 +353,87 @@ TEST_CASE("existing case-distinct a.cpp and A.cpp select their own commands; ali
 }
 #endif
 
+TEST_CASE("indexed lookup answers exactly like a per-entry filesystem comparison, once per database") {
+  const fs::path root = fs::temp_directory_path() /
+                        ("lcm-db-index-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+  fs::create_directories(root / "src" / "sub");
+  for (const char* name : {"src/a.cpp", "src/b.cpp", "src/sub/c.cpp"}) {
+    std::ofstream out(root / path_from_utf8(name), std::ios::binary);
+    out << "int x;\n";
+  }
+  std::error_code link_error;
+  fs::create_hard_link(root / "src" / "a.cpp", root / "src" / "hard_a.cpp", link_error);
+  // Today's rule, entry by entry, as the reference.
+  const auto reference = [](const CompilationDatabase& db, const fs::path& query) {
+    std::vector<const CompileCommand*> out;
+    std::error_code ec;
+    const bool query_exists = fs::exists(query, ec) && !ec;
+    for (const auto& command : db.commands) {
+      std::error_code ec2;
+      const bool command_exists = query_exists && fs::exists(command.file, ec2) && !ec2;
+      if (command_exists ? same_existing_file(command.file, query) : path_key(command.file) == path_key(query)) {
+        out.push_back(&command);
+      }
+    }
+    return out;
+  };
+  std::vector<fs::path> files{root / "src" / "a.cpp",       root / "src" / "b.cpp",
+                              root / "src" / "sub" / "c.cpp", root / "src" / "missing.cpp",
+                              root / path_from_utf8("src/sub/../a.cpp"), root / "src" / "sub"};
+  if (!link_error) files.push_back(root / "src" / "hard_a.cpp");
+#ifdef _WIN32
+  files.push_back(root / "SRC" / "A.CPP");      // case alias of an existing file
+  files.push_back(root / "SRC" / "MISSING.CPP");  // case variant of a missing file: lexical key
+#endif
+  CompilationDatabase db;
+  for (std::size_t i = 0; i < files.size(); ++i) {
+    CompileCommand c;
+    c.directory = root;
+    c.file = files[i];
+    c.arguments = {"cl.exe", "/c", "/DENTRY" + std::to_string(i), generic(files[i])};
+    c.command_id = compute_command_id(c);
+    db.commands.push_back(c);
+  }
+  std::vector<fs::path> queries = files;
+  queries.push_back(root / "src" / "other.cpp");
+  queries.push_back(root / "elsewhere" / "a.cpp");
+  const auto check_all = [&](const CompilationDatabase& d) {
+    for (const auto& q : queries) {
+      CAPTURE(generic(q));
+      CHECK(d.commands_for_file(q) == reference(d, q));
+      const auto sel = d.select_unique(q);
+      CHECK(sel.candidates == reference(d, q));
+    }
+  };
+  check_all(db);
+  check_all(db);  // answered from the per-database index
+  // A relative query resolves against the base exactly as before.
+  CHECK(db.commands_for_file(path_from_utf8("src/b.cpp"), root) == reference(db, root / "src" / "b.cpp"));
+  // Changing the commands is noticed; a copy asks the filesystem itself.
+  CompileCommand extra;
+  extra.directory = root;
+  extra.file = root / "src" / "b.cpp";
+  extra.arguments = {"cl.exe", "/c", "/DEXTRA", "src/b.cpp"};
+  extra.command_id = compute_command_id(extra);
+  db.commands.push_back(extra);
+  check_all(db);
+  CHECK(db.select_unique(root / "src" / "b.cpp").kind == CommandSelection::Kind::ambiguous);
+  const CompilationDatabase copy = db;
+  check_all(copy);
+  // The index keeps the answers of the first lookup: a file created afterwards
+  // is still the missing entry it was (one loaded database, one answer).
+  {
+    std::ofstream out(root / "src" / "missing.cpp", std::ios::binary);
+    out << "int now_here;\n";
+  }
+  CHECK(db.commands_for_file(root / "src" / "missing.cpp").size() ==
+        static_cast<std::size_t>(std::count_if(db.commands.begin(), db.commands.end(), [&](const CompileCommand& c) {
+          return path_key(c.file) == path_key(root / "src" / "missing.cpp");
+        })));
+  std::error_code ec;
+  fs::remove_all(root, ec);
+}
+
 TEST_CASE("loading a database by relative path still yields absolute command paths") {
   const fs::path previous = fs::current_path();
   fs::current_path(fixture_dir());
